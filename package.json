@@ -1,0 +1,37 @@
+{
+  "name": "@zackify/pi-bg-tasks",
+  "version": "0.1.0",
+  "description": "A pi extension that runs and manages background commands in tmux.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zackify/pi-bg-tasks.git"
+  },
+  "homepage": "https://github.com/zackify/pi-bg-tasks#readme",
+  "bugs": {
+    "url": "https://github.com/zackify/pi-bg-tasks/issues"
+  },
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "background-tasks",
+    "tmux",
+    "tui"
+  ],
+  "license": "MIT",
+  "files": [
+    "extensions/bg.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/bg.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*"
+  }
+}
