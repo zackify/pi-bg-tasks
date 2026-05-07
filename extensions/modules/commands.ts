@@ -80,12 +80,3 @@ export async function killRunningCommand(
 	await refreshRunning(pi, ctx, updateWidget);
 	return true;
 }
-
-/**
- * Get recent commands for cwd
- */
-export function getRecentCommands(cwd: string): string[] {
-	// Import dynamically to avoid circular deps
-	const { getRecentCommands: getRecents } = require("./cache.js");
-	return getRecents(cwd);
-}

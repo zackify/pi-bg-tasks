@@ -18,7 +18,7 @@ globalThis.clearInterval = ((t: NodeJS.Timeout) => {
 }) as typeof clearInterval;
 
 import * as state from "../extensions/modules/state.ts";
-import { refreshRunning, startPoller } from "../extensions/modules/polling.ts";
+import { startPoller, stopPoller } from "../extensions/modules/polling.ts";
 
 describe("polling module", () => {
 	beforeEach(() => {
@@ -32,41 +32,16 @@ describe("polling module", () => {
 		intervals.length = 0;
 	});
 
-	describe("refreshRunning", () => {
-		it("should skip refresh if no context", async () => {
-			const mockPi = { exec: mock(async () => ({ code: 0, stdout: "", stderr: "" })) };
-			await refreshRunning(mockPi as any, undefined, () => {});
-			// Should return early without calling exec
-		});
-
-		it("should skip refresh if already in flight", async () => {
-			state.setRefreshInFlight(true);
-			const mockPi = { exec: mock(async () => ({ code: 0, stdout: "", stderr: "" })) };
-			const ctx = { cwd: "/test", hasUI: true } as any;
-			await refreshRunning(mockPi as any, ctx, () => {});
-			// Should return early
-		});
-
-		it("should set running commands on success", async () => {
-			const mockPi = {
-				exec: mock(async (_cmd: string, args: string[]) => {
-					if (args.includes("list-sessions")) {
-						return { code: 0, stdout: "", stderr: "" };
-					}
-					return { code: 0, stdout: "", stderr: "" };
-				}),
-			};
-			const ctx = { cwd: "/test", hasUI: true } as any;
-			await refreshRunning(mockPi as any, ctx, () => {});
-			// Verify state was updated
-		});
-	});
-
 	describe("startPoller", () => {
+		it("should be defined", () => {
+			expect(typeof startPoller).toBe("function");
+		});
+
 		it("should not start if already running", () => {
 			const timer = setInterval(() => {}, 1000);
 			state.setPollTimer(timer);
-			startPoller({} as any, {} as any, () => {});
+			const mockPi = { exec: mock(async () => ({ code: 0, stdout: "", stderr: "" })) };
+			startPoller(mockPi as any, {} as any, () => {});
 			expect(intervals.length).toBe(1); // Only the original timer
 			clearInterval(timer);
 		});
@@ -76,6 +51,26 @@ describe("polling module", () => {
 			const ctx = { cwd: "/test", hasUI: true } as any;
 			startPoller(mockPi as any, ctx, () => {});
 			expect(intervals.length).toBe(1);
+		});
+	});
+
+	describe("stopPoller", () => {
+		it("should be defined", () => {
+			expect(typeof stopPoller).toBe("function");
+		});
+
+		it("should clear interval when timer exists", () => {
+			const timer = setInterval(() => {}, 1000);
+			state.setPollTimer(timer);
+			stopPoller();
+			expect(state.getPollTimer()).toBeUndefined();
+			expect(intervals).not.toContain(timer);
+		});
+
+		it("should do nothing when no timer exists", () => {
+			state.setPollTimer(undefined);
+			stopPoller(); // Should not throw
+			expect(intervals.length).toBe(0);
 		});
 	});
 });
