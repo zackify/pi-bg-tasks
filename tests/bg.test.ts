@@ -12,29 +12,80 @@ mock.module("node:child_process", () => ({
   spawnSync: mockSpawnSync,
 }));
 
-mock.module("node:fs", () => ({
+const mockFsModule = {
   readFileSync: mockReadFileSync,
   writeFileSync: mockWriteFileSync,
   mkdirSync: mockMkdirSync,
   unlinkSync: mockUnlinkSync,
+};
+
+mock.module("node:fs", () => ({
+  ...mockFsModule,
+  default: mockFsModule,
 }));
 
+class MockDynamicBorder {
+  formatter: (s: string) => string;
+  constructor(formatter: (s: string) => string) { this.formatter = formatter; }
+  render(width: number) { return [this.formatter("─".repeat(width))]; }
+}
+class MockText {
+  value: string;
+  constructor(value: string) { this.value = value; }
+  render() { return [this.value]; }
+}
+
 mock.module("@mariozechner/pi-tui", () => ({
-  DynamicBorder: class { render() { return ["─".repeat(40)]; } },
-  Text: class { render() { return ["text"]; } },
+  DynamicBorder: MockDynamicBorder,
+  Text: MockText,
   Key: { up: "up", down: "down", enter: "enter", escape: "escape" },
-  matchesKey: mock((d: string, k: any) => d === k || d === "arrowup" || d === "arrowdown"),
-  truncateToWidth: mock((s: string) => s),
+  matchesKey: mock((d: string, k: any) => d === k),
+  truncateToWidth: mock((s: string, width: number, ellipsis = "…") => s.length <= width ? s : `${s.slice(0, width - ellipsis.length)}${ellipsis}`),
 }));
 
 mock.module("@mariozechner/pi-coding-agent", () => ({
   ExtensionAPI: {},
   ExtensionCommandContext: {},
   ExtensionContext: {},
-  DynamicBorder: {},
+  DynamicBorder: MockDynamicBorder,
 }));
 
-import bgExtension from "../extensions/bg.ts";
+import bgExtension, {
+  __resetBgStateForTest,
+  __setRefreshInFlightForTest,
+  __setRunningForTest,
+  attachToCommand,
+  buildMenuItems,
+  cwdKey,
+  exec,
+  getRecentCommands,
+  installProcessHooks,
+  killAllRunningCommands,
+  killAllRunningCommandsSync,
+  killRunningCommand,
+  killSessionSync,
+  listRunningCommands,
+  loadCache,
+  makeSessionId,
+  moveSelection,
+  readLogs,
+  refreshRunning,
+  rememberCommand,
+  runningForCwd,
+  saveCache,
+  selectableItems,
+  shellQuote,
+  showBgMenu,
+  showLogs,
+  startBackgroundCommand,
+  startPoller,
+  stopPoller,
+  tmuxAvailable,
+  truncateMiddle,
+  updateWidget,
+  uninstallProcessHooks,
+  type RunningCommand,
+} from "../extensions/bg.ts";
 
 // ============================================
 // Test helpers
@@ -64,16 +115,19 @@ function createMockCtx(cwd = "/test/project") {
 
 // Track all setInterval calls for cleanup
 const intervals: NodeJS.Timeout[] = [];
+const intervalFns: Array<() => any> = [];
 const originalSetInterval = globalThis.setInterval;
 globalThis.setInterval = ((fn: any, ms?: number) => {
   const t = originalSetInterval(fn, ms) as NodeJS.Timeout;
   intervals.push(t);
+  intervalFns.push(fn);
   return t;
 }) as typeof setInterval;
 
 function clearIntervals() {
   intervals.forEach(t => clearInterval(t));
   intervals.length = 0;
+  intervalFns.length = 0;
 }
 
 // ============================================
@@ -89,6 +143,7 @@ describe("bgExtension", () => {
     mockUnlinkSync.mockReset();
     mockSpawnSync.mockReset().mockImplementation(() => ({ status: 0, stdout: "", stderr: "" }));
     clearIntervals();
+    __resetBgStateForTest();
   });
 
   describe("initialization", () => {
@@ -1163,6 +1218,249 @@ describe("bgExtension", () => {
       
       const [, { handler }] = pi.registerCommand.mock.calls[0]!;
       await handler("", createMockCtx());
+    });
+  });
+
+  describe("exported internals", () => {
+    const command: RunningCommand = { session: "pi-bg-abc", command: "npm test", cwd: "/test/project", logFile: "/tmp/log", startedAt: 10 };
+    const theme = {
+      fg: (_name: string, s: string) => s,
+      bold: (s: string) => s,
+    };
+
+    function createInteractiveCtx(inputs: string[] = [], cwd = "/test/project") {
+      const components: any[] = [];
+      let result: any = null;
+      const tui = { stop: mock(() => {}), start: mock(() => {}), requestRender: mock(() => {}) };
+      const ctx = createMockCtx(cwd);
+      ctx.ui.requestRender = mock(() => {});
+      ctx.ui.custom = mock(async (factory: any) => {
+        const done = mock((value?: any) => { result = value ?? null; });
+        const component = factory(tui, theme, {}, done);
+        components.push(component);
+        component.render?.(80);
+        component.invalidate?.();
+        for (const input of inputs) component.handleInput?.(input);
+        await Promise.resolve();
+        return result;
+      });
+      return { ctx, tui, components, get result() { return result; } };
+    }
+
+    it("covers pure helpers and cache helpers", () => {
+      __setRunningForTest([command, { ...command, session: "other", cwd: "/other" }, { ...command, session: "empty", cwd: "" }]);
+      expect(runningForCwd("/test/project").map((c) => c.session)).toEqual(["pi-bg-abc"]);
+      expect(shellQuote("a'b")).toBe("'a'\"'\"'b'");
+      expect(truncateMiddle("abcdef", 5)).toBe("ab…ef");
+      expect(cwdKey("/tmp/../tmp")).toBe("/tmp");
+      mockReadFileSync.mockImplementationOnce(() => "bad json");
+      expect(loadCache()).toEqual({ cwds: {} });
+      saveCache({ cwds: { "/x": { recentBackgroundCommands: ["a"] } } });
+      expect(mockWriteFileSync).toHaveBeenCalled();
+      mockReadFileSync.mockImplementationOnce(() => JSON.stringify({ cwds: { "/test/project": { recentBackgroundCommands: ["", "npm test", "  ", 3] } } }));
+      expect(getRecentCommands("/test/project")).toEqual(["npm test"]);
+      mockReadFileSync.mockImplementationOnce(() => JSON.stringify({ cwds: { "/else": { recentBackgroundCommands: ["npm test", "npm test", "", "npm dev"] } } }));
+      expect(getRecentCommands("/test/project")).toEqual(["npm test", "npm dev"]);
+      mockReadFileSync.mockImplementationOnce(() => JSON.stringify({ cwds: {} }));
+      rememberCommand("/test/project", " npm test ");
+      mockReadFileSync.mockImplementationOnce(() => JSON.stringify({ cwds: { "/test/project": { recentBackgroundCommands: ["npm test", "old"] } } }));
+      rememberCommand("/test/project", " npm test ");
+      rememberCommand("/test/project", "   ");
+      expect(mockWriteFileSync).toHaveBeenCalled();
+      expect(selectableItems(buildMenuItems(["a"], [command]))).toEqual([1, 2, 4]);
+      expect(moveSelection([{ type: "separator", label: "s" }], 0, 1)).toBe(0);
+      expect(makeSessionId("/x", "cmd")).toStartWith("pi-bg-");
+    });
+
+    it("covers tmux/listing/process helpers", async () => {
+      mockSpawnSync.mockImplementationOnce(() => ({ status: 1 }));
+      expect(tmuxAvailable()).toBe(false);
+      mockSpawnSync.mockImplementation(() => ({ status: 0, stdout: "" }));
+      expect(tmuxAvailable()).toBe(true);
+      mockExec.mockImplementationOnce(async () => ({ code: 3, stdout: "", stderr: "" }));
+      expect(await listRunningCommands(createMockPi())).toEqual([]);
+      mockExec.mockImplementationOnce(async () => ({ code: 0, stdout: "x\npi-bg-old\npi-bg-new\n", stderr: "" }));
+      mockReadFileSync.mockImplementation((p: string) => {
+        if (p.includes("old")) return JSON.stringify({ command: "old", cwd: "/a", logFile: "/old", startedAt: 1 });
+        if (p.includes("new")) return JSON.stringify({ command: "new", cwd: "/a", logFile: "/new", startedAt: 2 });
+        throw new Error("missing");
+      });
+      expect((await listRunningCommands(createMockPi())).map((c) => c.command)).toEqual(["new", "old"]);
+      mockExec.mockImplementationOnce(async () => ({ code: 0, stdout: "pi-bg-missing", stderr: "" }));
+      mockReadFileSync.mockImplementationOnce(() => { throw new Error("missing"); });
+      expect((await listRunningCommands(createMockPi()))[0]).toEqual(expect.objectContaining({ command: "pi-bg-missing", cwd: "" }));
+      await exec(createMockPi(), "echo", ["x"], 1);
+      killSessionSync("pi-bg-one");
+      mockSpawnSync.mockImplementationOnce(() => ({ status: 1, stdout: "" }));
+      killAllRunningCommandsSync();
+      mockSpawnSync.mockImplementationOnce(() => ({ status: 0 })).mockImplementationOnce(() => ({ status: 1, stdout: "" }));
+      killAllRunningCommandsSync();
+      mockSpawnSync.mockImplementationOnce(() => ({ status: 0 })).mockImplementationOnce(() => ({ status: 0, stdout: "pi-bg-one\nother\npi-bg-two" }));
+      killAllRunningCommandsSync();
+      installProcessHooks();
+      installProcessHooks();
+      uninstallProcessHooks();
+      uninstallProcessHooks();
+    });
+
+    it("covers widget and refresh helpers", async () => {
+      const pi = createMockPi();
+      const { ctx } = createInteractiveCtx();
+      updateWidget(undefined);
+      updateWidget({ ...ctx, hasUI: false });
+      __setRunningForTest([command]);
+      updateWidget(ctx);
+      expect(ctx.ui.setWidget).toHaveBeenCalledWith("pi-bg-running", expect.any(Function), { placement: "aboveEditor" });
+      const widgetFactory = ctx.ui.setWidget.mock.calls[0]![1];
+      const widget = widgetFactory({}, theme);
+      expect(widget.render(80)[0]).toContain("1 bg command running");
+      widget.invalidate();
+      __setRunningForTest([command, { ...command, session: "pi-bg-2" }]);
+      expect(widget.render(80)[0]).toContain("2 bg commands running");
+      updateWidget(ctx);
+      __setRunningForTest([]);
+      updateWidget(ctx);
+      expect(ctx.ui.setWidget).toHaveBeenCalledWith("pi-bg-running", undefined);
+      __setRefreshInFlightForTest(true);
+      await refreshRunning(pi, ctx);
+      __setRefreshInFlightForTest(false);
+      await refreshRunning(pi);
+      mockExec.mockImplementationOnce(async () => ({ code: 0, stdout: "", stderr: "" }));
+      await refreshRunning(pi, ctx);
+      startPoller(pi);
+      await intervalFns.at(-1)?.();
+      startPoller(pi);
+      stopPoller();
+      stopPoller();
+    });
+
+    it("covers command start, logs, and kill helpers", async () => {
+      const pi = createMockPi();
+      const ctx = createMockCtx();
+      expect(await startBackgroundCommand(pi, ctx, "   ")).toBeUndefined();
+      mockSpawnSync.mockImplementationOnce(() => ({ status: 1 }));
+      expect(await startBackgroundCommand(pi, ctx, "npm test")).toBeUndefined();
+      mockSpawnSync.mockImplementation(() => ({ status: 0 }));
+      mockExec.mockImplementationOnce(async () => ({ code: 1, stdout: "stdout fail", stderr: "" }));
+      mockUnlinkSync.mockImplementationOnce(() => { throw new Error("unlink"); });
+      expect(await startBackgroundCommand(pi, ctx, "npm test")).toBeUndefined();
+      mockExec.mockImplementationOnce(async () => ({ code: 1, stdout: "", stderr: "" }));
+      await startBackgroundCommand(pi, ctx, "npm test");
+      mockExec.mockImplementation(async (_cmd: string, args: string[]) => args.includes("new-session") ? { code: 0, stdout: "", stderr: "" } : { code: 0, stdout: "", stderr: "" });
+      expect(await startBackgroundCommand(pi, ctx, " npm test ")).toEqual(expect.objectContaining({ command: "npm test" }));
+      mockExec.mockImplementationOnce(async () => ({ code: 1, stdout: "", stderr: "tail err" }));
+      expect(await readLogs(pi, command, 0)).toBe("tail err");
+      mockExec.mockImplementationOnce(async () => ({ code: 1, stdout: "", stderr: "" }));
+      expect(await readLogs(pi, command, 1000)).toBe("No log output yet.");
+      mockExec.mockImplementationOnce(async () => ({ code: 0, stdout: "logs\n", stderr: "" }));
+      expect(await readLogs(pi, command)).toBe("logs");
+      mockExec.mockImplementationOnce(async () => ({ code: 0, stdout: "", stderr: "" }));
+      expect(await readLogs(pi, command)).toBe("No log output yet.");
+      mockExec.mockImplementationOnce(async () => ({ code: 2, stdout: "", stderr: "bad" }));
+      expect(await killRunningCommand(pi, ctx, command)).toBe(false);
+      mockExec.mockImplementationOnce(async () => ({ code: 1, stdout: "", stderr: "can't find session" }));
+      mockUnlinkSync.mockImplementationOnce(() => { throw new Error("missing"); });
+      expect(await killRunningCommand(pi, ctx, command)).toBe(true);
+      mockExec.mockImplementationOnce(async () => ({ code: 0, stdout: "pi-bg-abc", stderr: "" }));
+      mockExec.mockImplementationOnce(async () => { throw new Error("kill failed"); });
+      mockReadFileSync.mockImplementationOnce(() => JSON.stringify(command));
+      await killAllRunningCommands(pi, ctx);
+    });
+
+    it("covers attach, menu, and log UI components", async () => {
+      const pi = createMockPi();
+      const noUi = { ...createMockCtx(), hasUI: false };
+      await attachToCommand(noUi, command);
+      const attached = createInteractiveCtx();
+      await attachToCommand(attached.ctx, command);
+      expect(attached.tui.stop).toHaveBeenCalled();
+
+      mockSpawnSync.mockImplementation(() => ({ status: 0 }));
+      mockReadFileSync.mockImplementation((p: string) => p.includes("bg-meta") ? JSON.stringify(command) : JSON.stringify({ cwds: { "/test/project": { recentBackgroundCommands: ["recent cmd"] } } }));
+      mockExec.mockImplementation(async (_cmd: string, args: string[]) => args.includes("list-sessions") ? { code: 0, stdout: "pi-bg-abc", stderr: "" } : { code: 0, stdout: "", stderr: "" });
+      let interactive = createInteractiveCtx(["down", "enter"]);
+      expect(await showBgMenu(pi, interactive.ctx as any)).toEqual({ type: "new", label: "New command…" });
+      interactive = createInteractiveCtx(["escape"]);
+      expect(await showBgMenu(pi, interactive.ctx as any)).toBeNull();
+      interactive = createInteractiveCtx(["k"]);
+      await showBgMenu(pi, interactive.ctx as any);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      interactive = createInteractiveCtx(["a"]);
+      await showBgMenu(pi, interactive.ctx as any);
+      interactive = createInteractiveCtx(["up"]);
+      expect(await showBgMenu(pi, interactive.ctx as any)).toBeNull();
+      mockReadFileSync.mockImplementation(() => "{}");
+      mockExec.mockImplementation(async (_cmd: string, args: string[]) => args.includes("list-sessions") ? { code: 0, stdout: "", stderr: "" } : { code: 0, stdout: "", stderr: "" });
+      interactive = createInteractiveCtx([]);
+      expect(await showBgMenu(pi, interactive.ctx as any)).toBeNull();
+
+      mockExec.mockImplementation(async (cmd: string) => cmd === "tail" ? { code: 0, stdout: Array.from({ length: 45 }, (_, i) => `line${i}`).join("\n"), stderr: "" } : { code: 0, stdout: "", stderr: "" });
+      interactive = createInteractiveCtx([]);
+      await showLogs(pi, interactive.ctx, command);
+      await intervalFns.at(-1)?.();
+      interactive.components[0]?.handleInput?.("q");
+      interactive = createInteractiveCtx(["q"]);
+      await showLogs(pi, interactive.ctx, command);
+      interactive = createInteractiveCtx(["k"]);
+      await showLogs(pi, interactive.ctx, command);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      interactive = createInteractiveCtx(["a"]);
+      await showLogs(pi, interactive.ctx, command);
+      interactive = createInteractiveCtx(["ctrl+c"]);
+      await showLogs(pi, interactive.ctx, command);
+    });
+
+    it("covers extension command and event branches", async () => {
+      const pi = createMockPi();
+      const ctx = createMockCtx();
+      bgExtension(pi);
+      const [, registered] = pi.registerCommand.mock.calls[0]!;
+      ctx.ui.custom = mock(async () => ({ type: "recent", command: "npm test" }));
+      mockSpawnSync.mockImplementation(() => ({ status: 0 }));
+      await registered.handler("", ctx);
+      expect(ctx.ui.setEditorText).toHaveBeenCalledWith("/bg npm test");
+      ctx.ui.custom = mock(async () => ({ type: "new", label: "New command…" }));
+      await registered.handler("", ctx);
+      expect(ctx.ui.setEditorText).toHaveBeenCalledWith("/bg ");
+      ctx.ui.custom = mock(async (factory: any) => {
+        const done = () => {};
+        const component = factory({ requestRender: mock(() => {}) }, theme, {}, done);
+        component.render?.(80);
+        component.invalidate?.();
+        component.handleInput?.("q");
+      });
+      mockExec.mockImplementation(async (cmd: string, args: string[]) => {
+        if (cmd === "tail") return { code: 0, stdout: "log", stderr: "" };
+        if (args.includes("list-sessions")) return { code: 0, stdout: "pi-bg-abc", stderr: "" };
+        return { code: 0, stdout: "", stderr: "" };
+      });
+      mockReadFileSync.mockImplementation((p: string) => p.includes("bg-meta") ? JSON.stringify(command) : "{}");
+      await registered.handler("", ctx);
+      let customCall = 0;
+      ctx.ui.custom = mock(async (factory: any) => {
+        customCall++;
+        if (customCall === 1) return { type: "running", running: command };
+        if (customCall === 2) {
+          const component = factory({ requestRender: mock(() => {}) }, theme, {}, () => {});
+          component.render?.(80);
+          component.invalidate?.();
+          component.handleInput?.("q");
+          return undefined;
+        }
+        return null;
+      });
+      await registered.handler("", ctx);
+      const editorHandler = (pi.events.on as any).mock.calls.find((c: any[]) => c[0] === "bg:editorUpEmpty")?.[1];
+      const startHandler = (pi.on as any).mock.calls.find((c: any[]) => c[0] === "session_start")?.[1];
+      const shutdownHandler = (pi.on as any).mock.calls.find((c: any[]) => c[0] === "session_shutdown")?.[1];
+      await startHandler({}, ctx);
+      const payload = { handled: false };
+      editorHandler(payload);
+      expect(payload.handled).toBe(true);
+      editorHandler({ handled: false });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await shutdownHandler({}, { ...ctx, hasUI: true });
+      await shutdownHandler({}, { ...ctx, hasUI: false });
     });
   });
 });

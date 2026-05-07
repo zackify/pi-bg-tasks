@@ -35,14 +35,7 @@ export type MenuItem =
 
 export function runningForCwd(cwd: string, running: RunningCommand[]): RunningCommand[] {
 	const normalized = path.resolve(cwd);
-	return running.filter((cmd) => {
-		if (!cmd.cwd) return false;
-		try {
-			return path.resolve(cmd.cwd) === normalized;
-		} catch {
-			return cmd.cwd === cwd;
-		}
-	});
+	return running.filter((cmd) => !!cmd.cwd && path.resolve(cmd.cwd) === normalized);
 }
 
 export function selectableItems(items: MenuItem[]): number[] {
