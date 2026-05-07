@@ -1,540 +1,52 @@
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { DynamicBorder } from "@mariozechner/pi-coding-agent";
-import { Key, matchesKey, Text, truncateToWidth } from "@mariozechner/pi-tui";
+// Main entry point for bg extension
+// Manages tmux background commands with a TUI interface
+
 import { spawnSync } from "node:child_process";
-import crypto from "node:crypto";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
+import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext, RunningCommand, MenuItem } from "./modules/types.js";
+import { WIDGET_ID, POLL_MS, META_DIR, SESSION_PREFIX } from "./modules/config.js";
+import { stopPoller, refreshRunning } from "./modules/polling.js";
+import { listRunningCommands, killSessionSync } from "./modules/tmux.js";
+import { getRecentCommands } from "./modules/cache.js";
+import { startBackgroundCommand, killRunningCommand as killCommand } from "./modules/commands.js";
+import { updateWidget } from "./modules/widget.js";
+import { showBgMenu, attachToCommand } from "./modules/menu.js";
+import { showLogs } from "./modules/logs.js";
+import { runningForCwd } from "./modules/utils.js";
+import {
+	getLatestCtx,
+	setLatestCtx,
+	getRunning,
+	setRunning,
+	getWidgetInstalled,
+	setWidgetInstalled,
+	getLogViewerOpen,
+	setLogViewerOpen,
+	getPollTimer,
+	setPollTimer,
+	getProcessHooksInstalled,
+	setProcessHooksInstalled,
+} from "./modules/state.js";
 
-const CACHE_PATH = path.join(os.homedir(), ".pi", "agent", "bg-cache.json");
-const META_DIR = path.join(os.homedir(), ".pi", "agent", "bg-meta");
-const LOG_DIR = path.join(os.homedir(), ".pi", "agent", "bg-logs");
-const WIDGET_ID = "pi-bg-running";
-const POLL_MS = 5000;
-const RECENT_LIMIT = 10;
-
-type Cache = {
-	cwds?: Record<string, CwdCache>;
-};
-
-type CwdCache = {
-	recentBackgroundCommands?: string[];
-};
-
-type RunningCommand = {
-	session: string;
-	command: string;
-	cwd: string;
-	logFile: string;
-	startedAt: number;
-};
-
-type MenuItem =
-	| { type: "new"; label: string }
-	| { type: "recent"; command: string }
-	| { type: "running"; running: RunningCommand }
-	| { type: "separator"; label: string };
-
-let latestCtx: ExtensionContext | undefined;
-let latestPi: ExtensionAPI | undefined;
-let running: RunningCommand[] = [];
-let pollTimer: NodeJS.Timeout | undefined;
-let refreshInFlight = false;
-let processHooksInstalled = false;
-let widgetInstalled = false;
-let logViewerOpen = false;
-
-function runningForCwd(cwd: string): RunningCommand[] {
-	const normalized = path.resolve(cwd);
-	return running.filter((cmd) => {
-		if (!cmd.cwd) return false;
-		try {
-			return path.resolve(cmd.cwd) === normalized;
-		} catch {
-			return cmd.cwd === cwd;
-		}
-	});
-}
-
-function shellQuote(value: string): string {
-	return `'${value.replace(/'/g, `'"'"'`)}'`;
-}
-
-function truncateMiddle(value: string, max = 80): string {
-	if (value.length <= max) return value;
-	const half = Math.floor((max - 1) / 2);
-	return `${value.slice(0, half)}…${value.slice(value.length - half)}`;
-}
-
-function loadCache(): Cache {
-	try {
-		return JSON.parse(fs.readFileSync(CACHE_PATH, "utf8")) as Cache;
-	} catch {
-		return { cwds: {} };
-	}
-}
-
-function saveCache(cache: Cache): void {
-	fs.mkdirSync(path.dirname(CACHE_PATH), { recursive: true });
-	fs.writeFileSync(CACHE_PATH, `${JSON.stringify(cache, null, "\t")}\n`, "utf8");
-}
-
-function cwdKey(cwd: string): string {
-	try {
-		return path.resolve(cwd);
-	} catch {
-		return cwd;
-	}
-}
-
-function getRecentCommands(cwd: string): string[] {
-	const cache = loadCache();
-	const key = cwdKey(cwd);
-	const recents = cache.cwds?.[key]?.recentBackgroundCommands ?? [];
-	const filtered = recents.filter(
-		(cmd): cmd is string => typeof cmd === "string" && !!cmd.trim(),
-	);
-	// If no recents for this cwd, show all recents
-	if (filtered.length === 0) {
-		const all = Object.values(cache.cwds ?? {}).flatMap(
-			(c) => c.recentBackgroundCommands ?? [],
-		);
-		return [...new Set(all)].filter((cmd): cmd is string => typeof cmd === "string" && !!cmd.trim());
-	}
-	return filtered;
-}
-
-function rememberCommand(cwd: string, command: string): void {
-	const trimmed = command.trim();
-	if (!trimmed) return;
-	const cache = loadCache();
-	const key = cwdKey(cwd);
-	cache.cwds ??= {};
-	cache.cwds[key] ??= { recentBackgroundCommands: [] };
-	const entry = cache.cwds[key];
-	const existing = (entry.recentBackgroundCommands ?? []).filter((cmd) => cmd !== trimmed);
-	entry.recentBackgroundCommands = [trimmed, ...existing].slice(0, RECENT_LIMIT);
-	saveCache(cache);
-}
-
-function tmuxAvailable(): boolean {
-	const result = spawnSync("tmux", ["-V"], { stdio: "ignore" });
-	return result.status === 0;
-}
-
-async function exec(pi: ExtensionAPI, command: string, args: string[], timeout = 8000) {
-	return pi.exec(command, args, { timeout });
-}
-
-async function listRunningCommands(pi: ExtensionAPI): Promise<RunningCommand[]> {
-	if (!tmuxAvailable()) return [];
-	const result = await exec(pi, "tmux", ["list-sessions", "-F", "#S"], 5000);
-	if (result.code !== 0) return [];
-	const sessions = result.stdout
-		.split(/\r?\n/)
-		.map((line) => line.trim())
-		.filter((line) => line.startsWith("pi-bg-"));
-
-	const commands: RunningCommand[] = [];
-	for (const session of sessions) {
-		const metaFile = path.join(META_DIR, `${session}.json`);
-		try {
-			const parsed = JSON.parse(fs.readFileSync(metaFile, "utf8")) as Partial<RunningCommand>;
-			commands.push({
-				session,
-				command: parsed.command || session,
-				cwd: parsed.cwd || "",
-				logFile: parsed.logFile || path.join(LOG_DIR, `${session}.log`),
-				startedAt: parsed.startedAt ?? 0,
-			});
-		} catch {
-			commands.push({
-				session,
-				command: session,
-				cwd: "",
-				logFile: path.join(LOG_DIR, `${session}.log`),
-				startedAt: 0,
-			});
-		}
-	}
-	return commands.sort((a, b) => b.startedAt - a.startedAt);
-}
-
-async function refreshRunning(pi: ExtensionAPI, ctx = latestCtx): Promise<void> {
-	if (!ctx || refreshInFlight) return;
-	refreshInFlight = true;
-	try {
-		running = await listRunningCommands(pi);
-		updateWidget(ctx);
-	} finally {
-		refreshInFlight = false;
-	}
-}
-
-function updateWidget(ctx: ExtensionContext | undefined): void {
-	if (!ctx?.hasUI) return;
-	latestCtx = ctx;
-	const here = runningForCwd(ctx.cwd);
-	if (here.length === 0) {
-		if (widgetInstalled) {
-			ctx.ui.setWidget(WIDGET_ID, undefined);
-			widgetInstalled = false;
-		}
-		return;
-	}
-	if (!widgetInstalled) {
-		ctx.ui.setWidget(
-			WIDGET_ID,
-			(_tui: any, theme: any) => ({
-				render(width: number): string[] {
-					const count = latestCtx ? runningForCwd(latestCtx.cwd).length : 0;
-					const noun = count === 1 ? "command" : "commands";
-					return [
-						truncateToWidth(
-							`${theme.fg("success", "●")} ${theme.fg("success", String(count))} ${theme.fg("success", `bg ${noun} running`)} ${theme.fg("dim", "(↑ or /bg)")}`,
-							width,
-							"…",
-						),
-					];
-				},
-				invalidate() {},
-			}),
-			{ placement: "aboveEditor" },
-		);
-		widgetInstalled = true;
-	}
-	(ctx.ui as any).requestRender?.();
-}
-
-function startPoller(pi: ExtensionAPI): void {
-	if (pollTimer) return;
-	pollTimer = setInterval(() => void refreshRunning(pi), POLL_MS);
-	pollTimer.unref?.();
-}
-
-function stopPoller(): void {
-	if (pollTimer) clearInterval(pollTimer);
-	pollTimer = undefined;
-}
-
-function killSessionSync(session: string): void {
-	spawnSync("tmux", ["kill-session", "-t", session], { stdio: "ignore", timeout: 3000 });
-}
-
-function killAllRunningCommandsSync(): void {
-	if (!tmuxAvailable()) return;
-	const result = spawnSync("tmux", ["list-sessions", "-F", "#S"], { encoding: "utf8", timeout: 3000 });
-	if (result.status !== 0 || !result.stdout) return;
-	for (const line of result.stdout.split(/\r?\n/)) {
-		const session = line.trim();
-		if (session.startsWith("pi-bg-")) killSessionSync(session);
-	}
-}
-
-async function killAllRunningCommands(pi: ExtensionAPI, ctx?: ExtensionContext): Promise<void> {
-	const commands = await listRunningCommands(pi);
-	for (const command of commands) {
-		await exec(pi, "tmux", ["kill-session", "-t", command.session], 5000).catch(() => undefined);
-	}
-	running = [];
-	if (ctx?.hasUI) updateWidget(ctx);
-}
-
-function installProcessHooks(): void {
-	if (processHooksInstalled) return;
-	processHooksInstalled = true;
-	process.on("exit", killAllRunningCommandsSync);
-	process.on("SIGINT", killAllRunningCommandsSync);
-	process.on("SIGTERM", killAllRunningCommandsSync);
-	process.on("SIGHUP", killAllRunningCommandsSync);
-}
-
-function uninstallProcessHooks(): void {
-	if (!processHooksInstalled) return;
-	processHooksInstalled = false;
-	process.off("exit", killAllRunningCommandsSync);
-	process.off("SIGINT", killAllRunningCommandsSync);
-	process.off("SIGTERM", killAllRunningCommandsSync);
-	process.off("SIGHUP", killAllRunningCommandsSync);
-}
-
-function makeSessionId(cwd: string, command: string): string {
-	const hash = crypto
-		.createHash("sha1")
-		.update(`${cwd}|${command}|${Date.now()}|${Math.random()}`)
-		.digest("hex")
-		.slice(0, 8);
-	return `pi-bg-${hash}`;
-}
-
-async function startBackgroundCommand(
-	pi: ExtensionAPI,
-	ctx: ExtensionContext,
-	command: string,
-): Promise<RunningCommand | undefined> {
-	const trimmed = command.trim();
-	if (!trimmed) {
-		ctx.ui.notify("Background command cannot be empty.", "error");
-		return undefined;
-	}
-	if (!tmuxAvailable()) {
-		ctx.ui.notify("tmux is not installed. Install tmux to use /bg.", "error");
-		return undefined;
-	}
-
-	fs.mkdirSync(META_DIR, { recursive: true });
-	fs.mkdirSync(LOG_DIR, { recursive: true });
-
-	const session = makeSessionId(ctx.cwd, trimmed);
-	const logFile = path.join(LOG_DIR, `${session}.log`);
-	const metadata: RunningCommand = {
-		session,
-		command: trimmed,
-		cwd: ctx.cwd,
-		logFile,
-		startedAt: Date.now(),
-	};
-	fs.writeFileSync(path.join(META_DIR, `${session}.json`), JSON.stringify(metadata, null, "\t"), "utf8");
-
-	const runScript = `cd ${shellQuote(ctx.cwd)} && exec bash -lc ${shellQuote(`${trimmed} 2>&1 | tee -a ${shellQuote(logFile)}`)}`;
-	const result = await exec(pi, "tmux", ["new-session", "-d", "-s", session, "-c", ctx.cwd, "bash", "-lc", runScript], 10000);
-	if (result.code !== 0) {
-		try {
-			fs.unlinkSync(path.join(META_DIR, `${session}.json`));
-		} catch {}
-		ctx.ui.notify((result.stderr || result.stdout || `Failed to start ${trimmed}`).trim(), "error");
-		return undefined;
-	}
-
-	rememberCommand(ctx.cwd, trimmed);
-	ctx.ui.notify(`Started: ${trimmed}\nSession: ${session}\nLogs: ${logFile}`, "info");
-	await refreshRunning(pi, ctx);
-	return metadata;
-}
-
-async function readLogs(pi: ExtensionAPI, command: RunningCommand, lines = 80): Promise<string> {
-	const result = await exec(pi, "tail", [`-n`, String(Math.max(1, Math.min(lines, 500))), command.logFile], 5000);
-	if (result.code !== 0) return result.stderr.trim() || "No log output yet.";
-	return result.stdout.trimEnd() || "No log output yet.";
-}
-
-async function killRunningCommand(
-	pi: ExtensionAPI,
-	ctx: ExtensionContext,
-	command: RunningCommand,
-): Promise<boolean> {
-	const result = await exec(pi, "tmux", ["kill-session", "-t", command.session], 5000);
-	if (result.code !== 0 && !/can't find session/i.test(result.stderr)) {
-		ctx.ui.notify(`Could not kill ${command.session}: ${(result.stderr || result.stdout).trim()}`, "error");
-		return false;
-	}
-	try {
-		fs.unlinkSync(path.join(META_DIR, `${command.session}.json`));
-	} catch {}
-	ctx.ui.notify(`Killed ${command.session}`, "info");
-	await refreshRunning(pi, ctx);
-	return true;
-}
-
-async function attachToCommand(ctx: ExtensionContext, command: RunningCommand): Promise<void> {
-	if (!ctx.hasUI) return;
-	await ctx.ui.custom<void>((tui, _theme, _kb, done) => {
-		tui.stop();
-		process.stdout.write("\x1b[2J\x1b[H");
-		spawnSync("tmux", ["attach", "-t", command.session], { stdio: "inherit" });
-		tui.start();
-		tui.requestRender(true);
-		done();
-		return { render: () => [], invalidate: () => {} };
-	});
-}
-
-function selectableItems(items: MenuItem[]): number[] {
-	return items.flatMap((item, index) => (item.type === "separator" ? [] : [index]));
-}
-
-function moveSelection(items: MenuItem[], selected: number, delta: number): number {
-	const selectable = selectableItems(items);
-	if (selectable.length === 0) return 0;
-	const current = Math.max(0, selectable.indexOf(selected));
-	const next = Math.max(0, Math.min(selectable.length - 1, current + delta));
-	return selectable[next]!;
-}
-
-function buildMenuItems(recents: string[], runningCommands: RunningCommand[]): MenuItem[] {
-	const items: MenuItem[] = [];
-	if (runningCommands.length > 0) {
-		items.push({ type: "separator", label: "running" });
-		for (const cmd of runningCommands) items.push({ type: "running", running: cmd });
-	}
-	items.push({ type: "new", label: "New command…" });
-	if (recents.length > 0) items.push({ type: "separator", label: "recent" });
-	for (const command of recents) items.push({ type: "recent", command });
-	return items;
-}
-
-async function showBgMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<MenuItem | null> {
-	let recents = getRecentCommands(ctx.cwd);
-	running = await listRunningCommands(pi);
-	updateWidget(ctx);
-	let here = runningForCwd(ctx.cwd);
-	let items = buildMenuItems(recents, here);
-	let selected = moveSelection(items, 0, 0);
-	let busy = false;
-
-	return ctx.ui.custom<MenuItem | null>((tui, theme, _kb, done) => ({
-		render(width: number): string[] {
-			const lines: string[] = [];
-			lines.push(...new DynamicBorder((s: string) => theme.fg("accent", s)).render(width));
-			lines.push(
-				...new Text(theme.fg("accent", theme.bold(`Background commands — ${ctx.cwd}`)), 1, 0).render(width),
-			);
-			if (items.length === 1 && items[0]?.type === "new") {
-				lines.push(truncateToWidth(`  ${theme.fg("dim", "No recent or running background commands")}`, width, "…"));
-			}
-			for (let i = 0; i < items.length; i++) {
-				const item = items[i]!;
-				const isSelected = i === selected;
-				const prefix = isSelected ? theme.fg("accent", "› ") : "  ";
-				if (item.type === "separator") {
-					const count = item.label === "running" ? here.length : recents.length;
-					lines.push(truncateToWidth(`  ${theme.fg("dim", `── ${item.label} (${count}) ──`)}`, width, "…"));
-				} else if (item.type === "new") {
-					lines.push(truncateToWidth(`${prefix}${isSelected ? theme.fg("accent", item.label) : item.label}`, width, "…"));
-				} else if (item.type === "recent") {
-					const text = truncateMiddle(item.command, 120);
-					lines.push(truncateToWidth(`${prefix}${isSelected ? theme.fg("accent", text) : text}`, width, "…"));
-				} else {
-					const cmd = truncateMiddle(item.running.command, 80);
-					const label = `${theme.fg("success", "●")} ${cmd} ${theme.fg("muted", item.running.session)}`;
-					lines.push(truncateToWidth(`${prefix}${isSelected ? theme.fg("accent", label) : label}`, width, "…"));
-				}
-			}
-			const help = busy
-				? "working…"
-				: "↑↓ navigate • enter start/show logs • k kill running • a attach • esc close";
-			lines.push(...new Text(theme.fg("dim", help), 1, 0).render(width));
-			lines.push(...new DynamicBorder((s: string) => theme.fg("accent", s)).render(width));
-			return lines;
-		},
-		invalidate() {},
-		handleInput(data: string) {
-			if (busy) return;
-			if (matchesKey(data, Key.up)) done(null);
-			else if (matchesKey(data, Key.down)) selected = moveSelection(items, selected, 1);
-			else if (matchesKey(data, Key.escape) || matchesKey(data, "ctrl+c")) done(null);
-			else if (matchesKey(data, Key.enter)) done(items[selected] ?? null);
-			else if (data === "k" && items[selected]?.type === "running") {
-				busy = true;
-				const command = (items[selected] as { type: "running"; running: RunningCommand }).running;
-				void killRunningCommand(pi, ctx, command)
-					.then(async () => {
-						recents = getRecentCommands(ctx.cwd);
-						running = await listRunningCommands(pi);
-						here = runningForCwd(ctx.cwd);
-						items = buildMenuItems(recents, here);
-						selected = moveSelection(items, Math.min(selected, items.length - 1), 0);
-					})
-					.finally(() => {
-						busy = false;
-						tui.requestRender();
-					});
-			} else if (data === "a" && items[selected]?.type === "running") {
-				const command = (items[selected] as { type: "running"; running: RunningCommand }).running;
-				done(null);
-				void attachToCommand(ctx, command);
-			}
-			tui.requestRender();
-		},
-	}));
-}
-
-async function showLogs(pi: ExtensionAPI, ctx: ExtensionContext, command: RunningCommand): Promise<void> {
-	let output = await readLogs(pi, command);
-	let busy = false;
-	let pollTimer: NodeJS.Timeout | undefined;
-	let currentTui: any = undefined;
-
-	const startPoller = () => {
-		if (pollTimer) return;
-		pollTimer = setInterval(async () => {
-			output = await readLogs(pi, command);
-			currentTui?.requestRender();
-		}, 1000);
-		pollTimer.unref?.();
-	};
-
-	const stopPoller = () => {
-		if (pollTimer) {
-			clearInterval(pollTimer);
-			pollTimer = undefined;
-		}
-	};
-
-	await ctx.ui.custom<void>((tui, theme, _kb, done) => {
-		currentTui = tui;
-		startPoller();
-		return {
-			render(width: number): string[] {
-				const lines: string[] = [];
-				lines.push(...new DynamicBorder((s: string) => theme.fg("accent", s)).render(width));
-				lines.push(
-					...new Text(
-						`${theme.fg("success", "●")} ${theme.fg("accent", theme.bold(command.command))} ${theme.fg("muted", command.session)}`,
-						1,
-						0,
-					).render(width),
-				);
-				const logLines = output.split(/\r?\n/).slice(-40);
-				for (const line of logLines) lines.push(truncateToWidth(line || " ", width, "…"));
-				lines.push(...new Text(theme.fg("dim", busy ? "working…" : "auto-refreshing • k kill • a attach • esc back"), 1, 0).render(width));
-				lines.push(...new DynamicBorder((s: string) => theme.fg("accent", s)).render(width));
-				return lines;
-			},
-			invalidate() {},
-			handleInput(data: string) {
-				if (busy) return;
-				if (matchesKey(data, Key.up) || matchesKey(data, Key.escape) || matchesKey(data, "ctrl+c") || data === "q") {
-					stopPoller();
-					done();
-				}
-				else if (data === "k") {
-					busy = true;
-					stopPoller();
-					void killRunningCommand(pi, ctx, command).finally(() => {
-						busy = false;
-						done();
-					});
-				} else if (data === "a") {
-					stopPoller();
-					done();
-					void attachToCommand(ctx, command);
-				}
-				tui.requestRender();
-			},
-		};
-	});
-}
+// Re-export types for public API
+export type { Cache, CwdCache, RunningCommand, MenuItem } from "./modules/types.js";
 
 export default function bgExtension(pi: ExtensionAPI) {
-	latestPi = pi;
 	installProcessHooks();
 
 	pi.events.on("bg:editorUpEmpty", (out: unknown) => {
 		const payload = out as { handled?: boolean };
-		const ctx = latestCtx;
-		if (!ctx?.hasUI || logViewerOpen) return;
-		const here = runningForCwd(ctx.cwd);
+		const ctx = getLatestCtx();
+		if (!ctx?.hasUI || getLogViewerOpen()) return;
+		const here = runningForCwd(ctx.cwd, getRunning());
 		if (here.length === 0) return;
 		payload.handled = true;
 		void (async () => {
-			logViewerOpen = true;
+			setLogViewerOpen(true);
 			try {
-				await showLogs(pi, ctx, here[0]!);
+				await showLogs(pi, ctx, here[0]!, killCommand, attachToCommand);
 			} finally {
-				logViewerOpen = false;
-				await refreshRunning(pi, ctx);
+				setLogViewerOpen(false);
+				await refreshRunning(pi, ctx, () => updateWidgetDirect(ctx));
 			}
 		})();
 	});
@@ -542,7 +54,7 @@ export default function bgExtension(pi: ExtensionAPI) {
 	pi.registerCommand("bg", {
 		description: "Start and manage tmux background commands in the current directory",
 		handler: async (args, ctx) => {
-			latestCtx = ctx;
+			setLatestCtx(ctx);
 			if (!tmuxAvailable()) {
 				ctx.ui.notify("tmux is not installed. Install tmux to use /bg.", "error");
 				return;
@@ -550,12 +62,25 @@ export default function bgExtension(pi: ExtensionAPI) {
 
 			const directCommand = args.trim();
 			if (directCommand) {
-				await startBackgroundCommand(pi, ctx, directCommand);
+				await startBackgroundCommand(pi, ctx, directCommand, () => updateWidgetDirect(ctx));
 				return;
 			}
 
 			while (true) {
-				const selected = await showBgMenu(pi, ctx);
+				const selected = await showBgMenu(
+					pi,
+					ctx,
+					() => getRecentCommands(ctx.cwd),
+					async () => {
+						const commands = await listRunningCommands(pi);
+						setRunning(commands);
+						return commands;
+					},
+					(cwd: string) => runningForCwd(cwd, getRunning()),
+					() => updateWidgetDirect(ctx),
+					(command: RunningCommand) => killCommand(pi, ctx, command, () => updateWidgetDirect(ctx)),
+					attachToCommand,
+				);
 				if (!selected) break;
 				if (selected.type === "new" || selected.type === "recent") {
 					const prefill = selected.type === "recent" ? selected.command : "";
@@ -563,8 +88,8 @@ export default function bgExtension(pi: ExtensionAPI) {
 					break;
 				}
 				if (selected.type === "running") {
-					await showLogs(pi, ctx, selected.running);
-					await refreshRunning(pi, ctx);
+					await showLogs(pi, ctx, selected.running, killCommand, attachToCommand);
+					await refreshRunning(pi, ctx, () => updateWidgetDirect(ctx));
 					continue;
 				}
 			}
@@ -572,19 +97,83 @@ export default function bgExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
-		latestCtx = ctx;
+		setLatestCtx(ctx);
 		if (!ctx.hasUI) return;
-		await refreshRunning(pi, ctx);
-		startPoller(pi);
+		await refreshRunning(pi, ctx, () => updateWidgetDirect(ctx));
+		startPollerDirect(pi);
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
 		stopPoller();
-		await killAllRunningCommands(pi, ctx);
+		await killAllRunningCommands(pi);
 		uninstallProcessHooks();
 		if (ctx.hasUI) {
 			ctx.ui.setWidget(WIDGET_ID, undefined);
-			widgetInstalled = false;
+			setWidgetInstalled(false);
 		}
 	});
+}
+
+// Check if tmux is available
+function tmuxAvailable(): boolean {
+	const result = spawnSync("tmux", ["-V"], { stdio: "ignore" });
+	return result.status === 0;
+}
+
+// Sync kill all running commands (used for process hooks)
+function killAllRunningCommandsSync(): void {
+	if (!tmuxAvailable()) return;
+	const result = spawnSync("tmux", ["list-sessions", "-F", "#S"], { encoding: "utf8", timeout: 3000 });
+	if (result.status !== 0 || !result.stdout) return;
+	for (const line of result.stdout.split(/\r?\n/)) {
+		const session = line.trim();
+		if (session.startsWith(SESSION_PREFIX)) {
+			killSessionSync(session);
+		}
+	}
+}
+
+// Install process hooks
+function installProcessHooks(): void {
+	if (getProcessHooksInstalled()) return;
+	setProcessHooksInstalled(true);
+	process.on("exit", killAllRunningCommandsSync);
+	process.on("SIGINT", killAllRunningCommandsSync);
+	process.on("SIGTERM", killAllRunningCommandsSync);
+	process.on("SIGHUP", killAllRunningCommandsSync);
+}
+
+// Uninstall process hooks
+function uninstallProcessHooks(): void {
+	if (!getProcessHooksInstalled()) return;
+	setProcessHooksInstalled(false);
+	process.off("exit", killAllRunningCommandsSync);
+	process.off("SIGINT", killAllRunningCommandsSync);
+	process.off("SIGTERM", killAllRunningCommandsSync);
+	process.off("SIGHUP", killAllRunningCommandsSync);
+}
+
+// Direct widget update helper
+function updateWidgetDirect(ctx: ExtensionContext | undefined): void {
+	setWidgetInstalled(updateWidget(ctx, getRunning(), getWidgetInstalled(), ctx?.ui.setWidget.bind(ctx.ui), () => ctx?.ui.requestRender?.()));
+}
+
+// Direct poller helper
+function startPollerDirect(pi: ExtensionAPI): void {
+	const existing = getPollTimer();
+	if (existing) return;
+	const timer = setInterval(() => {
+		const latestCtx = getLatestCtx();
+		void refreshRunning(pi, latestCtx, () => updateWidgetDirect(latestCtx));
+	}, POLL_MS);
+	timer.unref?.();
+	setPollTimer(timer);
+}
+
+// Async kill all running commands
+async function killAllRunningCommands(pi: ExtensionAPI): Promise<void> {
+	const commands = await listRunningCommands(pi);
+	for (const command of commands) {
+		await pi.exec("tmux", ["kill-session", "-t", command.session], { timeout: 5000 }).catch(() => undefined);
+	}
 }

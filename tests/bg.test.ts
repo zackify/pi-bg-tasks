@@ -31,7 +31,7 @@ mock.module("@mariozechner/pi-coding-agent", () => ({
   ExtensionAPI: {},
   ExtensionCommandContext: {},
   ExtensionContext: {},
-  DynamicBorder: {},
+  DynamicBorder: class { render() { return ["─".repeat(40)]; } },
 }));
 
 import bgExtension from "../extensions/bg.ts";
