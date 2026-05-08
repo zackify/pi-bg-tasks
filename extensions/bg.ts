@@ -409,7 +409,7 @@ export async function showBgMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext)
 		invalidate() {},
 		handleInput(data: string) {
 			if (busy) return;
-			if (matchesKey(data, Key.up)) done(null);
+			if (matchesKey(data, Key.up)) selected = moveSelection(items, selected, -1);
 			else if (matchesKey(data, Key.down)) selected = moveSelection(items, selected, 1);
 			else if (matchesKey(data, Key.escape) || matchesKey(data, "ctrl+c")) done(null);
 			else if (matchesKey(data, Key.enter)) done(items[selected] ?? null);

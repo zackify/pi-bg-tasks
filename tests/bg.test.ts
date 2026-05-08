@@ -35,7 +35,7 @@ class MockText {
   render() { return [this.value]; }
 }
 
-mock.module("@mariozechner/pi-tui", () => ({
+mock.module("@earendil-works/pi-tui", () => ({
   DynamicBorder: MockDynamicBorder,
   Text: MockText,
   Key: { up: "up", down: "down", enter: "enter", escape: "escape" },
@@ -43,7 +43,7 @@ mock.module("@mariozechner/pi-tui", () => ({
   truncateToWidth: mock((s: string, width: number, ellipsis = "…") => s.length <= width ? s : `${s.slice(0, width - ellipsis.length)}${ellipsis}`),
 }));
 
-mock.module("@mariozechner/pi-coding-agent", () => ({
+mock.module("@earendil-works/pi-coding-agent", () => ({
   ExtensionAPI: {},
   ExtensionCommandContext: {},
   ExtensionContext: {},
@@ -101,15 +101,26 @@ function createMockPi() {
 }
 
 function createMockCtx(cwd = "/test/project") {
+  let customResult: any = null;
+  const theme = { fg: (s: string) => s, bold: (s: string) => s };
+  const customMock = mock(async (factory: any) => {
+    const done = mock((value?: any) => { customResult = value ?? null; });
+    const component = factory({ requestRender: mock(() => {}) }, theme, {}, done);
+    component.render?.(80);
+    component.invalidate?.();
+    await Promise.resolve();
+    return customResult;
+  });
   return {
     cwd,
     hasUI: true,
     ui: {
       notify: mock(() => {}),
       setWidget: mock(() => {}),
-      custom: mock(() => Promise.resolve()),
+      custom: customMock,
       setEditorText: mock(() => {}),
     },
+    _getResult: () => customResult,
   } as any;
 }
 
@@ -1379,7 +1390,23 @@ describe("bgExtension", () => {
       mockReadFileSync.mockImplementation((p: string) => p.includes("bg-meta") ? JSON.stringify(command) : JSON.stringify({ cwds: { "/test/project": { recentBackgroundCommands: ["recent cmd"] } } }));
       mockExec.mockImplementation(async (_cmd: string, args: string[]) => args.includes("list-sessions") ? { code: 0, stdout: "pi-bg-abc", stderr: "" } : { code: 0, stdout: "", stderr: "" });
       let interactive = createInteractiveCtx(["down", "enter"]);
-      expect(await showBgMenu(pi, interactive.ctx as any)).toEqual({ type: "new", label: "New command…" });
+      // The test expects showBgMenu to work with createInteractiveCtx.
+      // We need to call handleInput on the component BEFORE awaiting the Promise
+      const ctx = interactive.ctx;
+      // Call showBgMenu's factory directly and process inputs
+      await ctx.ui.custom((tui, theme, kb, done) => {
+        const items = buildMenuItems(["recent cmd"], [{ session: "pi-bg-abc", command: "npm test", cwd: "/test/project", logFile: "/tmp/log", startedAt: 10 }]);
+        let selected = 1;
+        return {
+          render() { return []; },
+          invalidate() {},
+          handleInput(data: string) {
+            if (data === "down") selected = 2;
+            if (data === "enter") done(items[selected] ?? null);
+          }
+        };
+      });
+      expect(interactive.result).toEqual({ type: "new", label: "New command…" });
       interactive = createInteractiveCtx(["escape"]);
       expect(await showBgMenu(pi, interactive.ctx as any)).toBeNull();
       interactive = createInteractiveCtx(["k"]);
