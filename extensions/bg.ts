@@ -1,6 +1,6 @@
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { DynamicBorder } from "@mariozechner/pi-coding-agent";
-import { Key, matchesKey, Text, truncateToWidth } from "@mariozechner/pi-tui";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { DynamicBorder } from "@earendil-works/pi-coding-agent";
+import { Key, matchesKey, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -192,7 +192,7 @@ export function updateWidget(ctx: ExtensionContext | undefined): void {
 		);
 		widgetInstalled = true;
 	}
-	(ctx.ui as any).requestRender?.();
+	ctx.ui.requestRender?.();
 }
 
 export function startPoller(pi: ExtensionAPI): void {
@@ -296,7 +296,7 @@ export async function startBackgroundCommand(
 	}
 
 	rememberCommand(ctx.cwd, trimmed);
-	ctx.ui.notify(`Started: ${trimmed}\nSession: ${session}\nLogs: ${logFile}`, "info");
+	ctx.ui.notify(`Started: ${trimmed}\nSession: ${session}\nLogs: ${logFile}`, "success");
 	await refreshRunning(pi, ctx);
 	return metadata;
 }
@@ -476,7 +476,7 @@ export async function showLogs(pi: ExtensionAPI, ctx: ExtensionContext, command:
 				);
 				const logLines = output.split(/\r?\n/).slice(-40);
 				for (const line of logLines) lines.push(truncateToWidth(line || " ", width, "…"));
-				lines.push(...new Text(theme.fg("dim", busy ? "working…" : "auto-refreshing • k kill • a attach • esc back"), 1, 0).render(width));
+				lines.push(...new Text(theme.fg("dim", busy ? "working…" : "auto-refreshing • ↑/esc back • k kill • a attach"), 1, 0).render(width));
 				lines.push(...new DynamicBorder((s: string) => theme.fg("accent", s)).render(width));
 				return lines;
 			},
@@ -526,13 +526,12 @@ export function __setRefreshInFlightForTest(value: boolean): void {
 export default function bgExtension(pi: ExtensionAPI) {
 	installProcessHooks();
 
-	pi.events.on("bg:editorUpEmpty", (out: unknown) => {
-		const payload = out as { handled?: boolean };
+	pi.events.on("bg:editorUpEmpty", (out: { handled: boolean }) => {
 		const ctx = latestCtx;
 		if (!ctx?.hasUI || logViewerOpen) return;
 		const here = runningForCwd(ctx.cwd);
 		if (here.length === 0) return;
-		payload.handled = true;
+		out.handled = true;
 		void (async () => {
 			logViewerOpen = true;
 			try {
