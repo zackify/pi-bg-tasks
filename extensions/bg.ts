@@ -1,6 +1,6 @@
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { DynamicBorder } from "@mariozechner/pi-coding-agent";
-import { Key, matchesKey, Text, truncateToWidth } from "@mariozechner/pi-tui";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { DynamicBorder } from "@earendil-works/pi-coding-agent";
+import { Key, matchesKey, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -204,7 +204,7 @@ function updateWidget(ctx: ExtensionContext | undefined): void {
 		);
 		widgetInstalled = true;
 	}
-	(ctx.ui as any).requestRender?.();
+	ctx.ui.requestRender?.();
 }
 
 function startPoller(pi: ExtensionAPI): void {
@@ -308,7 +308,7 @@ async function startBackgroundCommand(
 	}
 
 	rememberCommand(ctx.cwd, trimmed);
-	ctx.ui.notify(`Started: ${trimmed}\nSession: ${session}\nLogs: ${logFile}`, "info");
+	ctx.ui.notify(`Started: ${trimmed}\nSession: ${session}\nLogs: ${logFile}`, "success");
 	await refreshRunning(pi, ctx);
 	return metadata;
 }
@@ -421,7 +421,7 @@ async function showBgMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promi
 		invalidate() {},
 		handleInput(data: string) {
 			if (busy) return;
-			if (matchesKey(data, Key.up)) done(null);
+			if (matchesKey(data, Key.up)) selected = moveSelection(items, selected, -1);
 			else if (matchesKey(data, Key.down)) selected = moveSelection(items, selected, 1);
 			else if (matchesKey(data, Key.escape) || matchesKey(data, "ctrl+c")) done(null);
 			else if (matchesKey(data, Key.enter)) done(items[selected] ?? null);
@@ -488,7 +488,7 @@ async function showLogs(pi: ExtensionAPI, ctx: ExtensionContext, command: Runnin
 				);
 				const logLines = output.split(/\r?\n/).slice(-40);
 				for (const line of logLines) lines.push(truncateToWidth(line || " ", width, "…"));
-				lines.push(...new Text(theme.fg("dim", busy ? "working…" : "auto-refreshing • k kill • a attach • esc back"), 1, 0).render(width));
+				lines.push(...new Text(theme.fg("dim", busy ? "working…" : "auto-refreshing • ↑/esc back • k kill • a attach"), 1, 0).render(width));
 				lines.push(...new DynamicBorder((s: string) => theme.fg("accent", s)).render(width));
 				return lines;
 			},
@@ -521,13 +521,12 @@ export default function bgExtension(pi: ExtensionAPI) {
 	latestPi = pi;
 	installProcessHooks();
 
-	pi.events.on("bg:editorUpEmpty", (out: unknown) => {
-		const payload = out as { handled?: boolean };
+	pi.events.on("bg:editorUpEmpty", (out: { handled: boolean }) => {
 		const ctx = latestCtx;
 		if (!ctx?.hasUI || logViewerOpen) return;
 		const here = runningForCwd(ctx.cwd);
 		if (here.length === 0) return;
-		payload.handled = true;
+		out.handled = true;
 		void (async () => {
 			logViewerOpen = true;
 			try {
