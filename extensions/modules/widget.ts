@@ -2,7 +2,7 @@
 
 import type { ExtensionContext, RunningCommand } from "./types.js";
 import { WIDGET_ID } from "./config.js";
-import { truncateToWidth } from "@mariozechner/pi-tui";
+import { truncateToWidth } from "@earendil-works/pi-tui";
 import { runningForCwd } from "./utils.js";
 
 /**

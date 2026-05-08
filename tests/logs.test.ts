@@ -19,7 +19,7 @@ globalThis.clearInterval = ((t: NodeJS.Timeout) => {
 
 const mockExec = mock(async () => ({ code: 0, stdout: "", stderr: "" }));
 
-mock.module("@mariozechner/pi-tui", () => ({
+mock.module("@earendil-works/pi-tui", () => ({
 	Key: { up: "up", down: "down", enter: "enter", escape: "escape" },
 	matchesKey: mock((d: string, k: any) => d === k),
 	truncateToWidth: mock((s: string) => s),
@@ -34,7 +34,7 @@ mock.module("@mariozechner/pi-tui", () => ({
 	},
 }));
 
-mock.module("@mariozechner/pi-coding-agent", () => ({
+mock.module("@earendil-works/pi-coding-agent", () => ({
 	DynamicBorder: class {
 		constructor(color?: (s: string) => string) {
 			this.colorFn = color;

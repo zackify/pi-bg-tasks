@@ -1,8 +1,8 @@
 // Log viewer for bg extension
 
 import type { ExtensionAPI, ExtensionContext, RunningCommand } from "./types.js";
-import { truncateToWidth, Key, matchesKey, Text } from "@mariozechner/pi-tui";
-import { DynamicBorder } from "@mariozechner/pi-coding-agent";
+import { truncateToWidth, Key, matchesKey, Text } from "@earendil-works/pi-tui";
+import { DynamicBorder } from "@earendil-works/pi-coding-agent";
 import { exec, killRunningCommand as killTmuxCommand } from "./tmux.js";
 import { attachToCommand } from "./menu.js";
 import { LOG_POLL_MS, MAX_LOG_LINES, DEFAULT_LOG_LINES, DISPLAY_LOG_LINES } from "./config.js";

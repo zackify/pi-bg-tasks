@@ -7,8 +7,8 @@ import type {
 	RunningCommand,
 	MenuItem,
 } from "./types.js";
-import { truncateToWidth, Key, matchesKey, Text } from "@mariozechner/pi-tui";
-import { DynamicBorder } from "@mariozechner/pi-coding-agent";
+import { truncateToWidth, Key, matchesKey, Text } from "@earendil-works/pi-tui";
+import { DynamicBorder } from "@earendil-works/pi-coding-agent";
 import { truncateMiddle } from "./utils.js";
 import {
 	MENU_TRUNCATE_WIDTH,

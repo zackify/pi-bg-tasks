@@ -19,7 +19,7 @@ mock.module("node:fs", () => ({
   unlinkSync: mockUnlinkSync,
 }));
 
-mock.module("@mariozechner/pi-tui", () => ({
+mock.module("@earendil-works/pi-tui", () => ({
   DynamicBorder: class { render() { return ["─".repeat(40)]; } },
   Text: class { render() { return ["text"]; } },
   Key: { up: "up", down: "down", enter: "enter", escape: "escape" },
@@ -27,7 +27,7 @@ mock.module("@mariozechner/pi-tui", () => ({
   truncateToWidth: mock((s: string) => s),
 }));
 
-mock.module("@mariozechner/pi-coding-agent", () => ({
+mock.module("@earendil-works/pi-coding-agent", () => ({
   ExtensionAPI: {},
   ExtensionCommandContext: {},
   ExtensionContext: {},
