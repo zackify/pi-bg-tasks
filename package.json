@@ -1,6 +1,6 @@
 {
   "name": "@zackify/pi-bg-tasks",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "A pi extension that runs and manages background commands in tmux.",
   "repository": {
     "type": "git",
