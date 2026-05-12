@@ -8,6 +8,7 @@ Use it for dev servers, watchers, long-running scripts, or anything you want to 
 
 - `/bg <command>` starts a command in a detached `tmux` session from the current project directory
 - `/bg` opens an interactive menu for recent and running background commands
+- The LLM can launch and kill background tasks itself via the `start_bg_task` and `stop_bg_task` tools (e.g. "start `npm run dev` in the background")
 - A small widget appears above the editor while commands are running in the current directory
 - Press `↑` from the main chat to peek at the latest logs for a running background command
 - Press `↑` again while viewing logs to close the log viewer and return to chat
@@ -82,6 +83,20 @@ From the menu:
 - `Esc` closes the menu
 
 When a background command is running in the current directory, pi shows a small status widget above the editor. From the main chat, press `↑` to view its logs. While the log viewer is open, press `↑` again to close it.
+
+### LLM tools
+
+The extension also exposes two tools the model can call directly, so you can just ask in natural language:
+
+- `start_bg_task` — takes a `command` string and launches it the same way `/bg <command>` does. Returns the tmux session id and log file path.
+- `stop_bg_task` — takes the same `command` string and kills the matching background task in the current working directory. If nothing matches it returns the list of currently running tasks so the model can retry.
+
+Example prompts:
+
+- "Start `npm run dev` as a background task and then run the e2e tests."
+- "Kill the `npm run dev` background task."
+
+Matching is scoped to the current working directory, so the model cannot accidentally kill a task running in another project.
 
 ## History and logs
 

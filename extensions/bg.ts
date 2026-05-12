@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { DynamicBorder } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, Text, truncateToWidth } from "@earendil-works/pi-tui";
+import { Type } from "typebox";
 import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -204,7 +205,7 @@ function updateWidget(ctx: ExtensionContext | undefined): void {
 		);
 		widgetInstalled = true;
 	}
-	ctx.ui.requestRender?.();
+	(ctx.ui as { requestRender?: () => void }).requestRender?.();
 }
 
 function startPoller(pi: ExtensionAPI): void {
@@ -268,49 +269,98 @@ function makeSessionId(cwd: string, command: string): string {
 	return `pi-bg-${hash}`;
 }
 
-async function startBackgroundCommand(
+type StartResult = { ok: true; command: RunningCommand } | { ok: false; error: string };
+
+async function startBackgroundCommandCore(
 	pi: ExtensionAPI,
-	ctx: ExtensionContext,
+	cwd: string,
 	command: string,
-): Promise<RunningCommand | undefined> {
+): Promise<StartResult> {
 	const trimmed = command.trim();
-	if (!trimmed) {
-		ctx.ui.notify("Background command cannot be empty.", "error");
-		return undefined;
-	}
-	if (!tmuxAvailable()) {
-		ctx.ui.notify("tmux is not installed. Install tmux to use /bg.", "error");
-		return undefined;
-	}
+	if (!trimmed) return { ok: false, error: "Background command cannot be empty." };
+	if (!tmuxAvailable()) return { ok: false, error: "tmux is not installed. Install tmux to use background tasks." };
 
 	fs.mkdirSync(META_DIR, { recursive: true });
 	fs.mkdirSync(LOG_DIR, { recursive: true });
 
-	const session = makeSessionId(ctx.cwd, trimmed);
+	const session = makeSessionId(cwd, trimmed);
 	const logFile = path.join(LOG_DIR, `${session}.log`);
 	const metadata: RunningCommand = {
 		session,
 		command: trimmed,
-		cwd: ctx.cwd,
+		cwd,
 		logFile,
 		startedAt: Date.now(),
 	};
 	fs.writeFileSync(path.join(META_DIR, `${session}.json`), JSON.stringify(metadata, null, "\t"), "utf8");
 
-	const runScript = `cd ${shellQuote(ctx.cwd)} && exec bash -lc ${shellQuote(`${trimmed} 2>&1 | tee -a ${shellQuote(logFile)}`)}`;
-	const result = await exec(pi, "tmux", ["new-session", "-d", "-s", session, "-c", ctx.cwd, "bash", "-lc", runScript], 10000);
+	const runScript = `cd ${shellQuote(cwd)} && exec bash -lc ${shellQuote(`${trimmed} 2>&1 | tee -a ${shellQuote(logFile)}`)}`;
+	const result = await exec(pi, "tmux", ["new-session", "-d", "-s", session, "-c", cwd, "bash", "-lc", runScript], 10000);
 	if (result.code !== 0) {
 		try {
 			fs.unlinkSync(path.join(META_DIR, `${session}.json`));
 		} catch {}
-		ctx.ui.notify((result.stderr || result.stdout || `Failed to start ${trimmed}`).trim(), "error");
-		return undefined;
+		return { ok: false, error: (result.stderr || result.stdout || `Failed to start ${trimmed}`).trim() };
 	}
 
-	rememberCommand(ctx.cwd, trimmed);
-	ctx.ui.notify(`Started: ${trimmed}\nSession: ${session}\nLogs: ${logFile}`, "success");
+	rememberCommand(cwd, trimmed);
+	return { ok: true, command: metadata };
+}
+
+async function startBackgroundCommand(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	command: string,
+): Promise<RunningCommand | undefined> {
+	const result = await startBackgroundCommandCore(pi, ctx.cwd, command);
+	if (!result.ok) {
+		if (ctx.hasUI) ctx.ui.notify(result.error, "error");
+		return undefined;
+	}
+	if (ctx.hasUI) {
+		ctx.ui.notify(
+			`Started: ${result.command.command}\nSession: ${result.command.session}\nLogs: ${result.command.logFile}`,
+			"info",
+		);
+	}
 	await refreshRunning(pi, ctx);
-	return metadata;
+	return result.command;
+}
+
+async function stopBackgroundCommandsByName(
+	pi: ExtensionAPI,
+	cwd: string,
+	command: string,
+): Promise<{ killed: RunningCommand[]; running: RunningCommand[] }> {
+	const trimmed = command.trim();
+	const all = await listRunningCommands(pi);
+	const normalizedCwd = (() => {
+		try {
+			return path.resolve(cwd);
+		} catch {
+			return cwd;
+		}
+	})();
+	const matches = all.filter((c) => {
+		if (c.command.trim() !== trimmed) return false;
+		if (!c.cwd) return true;
+		try {
+			return path.resolve(c.cwd) === normalizedCwd;
+		} catch {
+			return c.cwd === cwd;
+		}
+	});
+	const killed: RunningCommand[] = [];
+	for (const match of matches) {
+		const result = await exec(pi, "tmux", ["kill-session", "-t", match.session], 5000);
+		if (result.code === 0 || /can't find session/i.test(result.stderr)) {
+			try {
+				fs.unlinkSync(path.join(META_DIR, `${match.session}.json`));
+			} catch {}
+			killed.push(match);
+		}
+	}
+	return { killed, running: all };
 }
 
 async function readLogs(pi: ExtensionAPI, command: RunningCommand, lines = 80): Promise<string> {
@@ -521,7 +571,110 @@ export default function bgExtension(pi: ExtensionAPI) {
 	latestPi = pi;
 	installProcessHooks();
 
-	pi.events.on("bg:editorUpEmpty", (out: { handled: boolean }) => {
+	pi.registerTool({
+		name: "start_bg_task",
+		label: "Start Background Task",
+		description:
+			"Start a shell command in a detached tmux background session from the current working directory. Equivalent to running `/bg <command>`. Output is logged to a file you can read later. Use this for dev servers, watchers, or any long-running process you want to keep running while the agent continues working. Stop it with stop_bg_task by passing the exact same command string.",
+		promptSnippet:
+			"Launch a shell command in a detached tmux background session (use stop_bg_task with the same command to kill it).",
+		parameters: Type.Object({
+			command: Type.String({
+				description:
+					"Shell command to run in the background, e.g. 'npm run dev'. Runs via `bash -lc` in the current working directory.",
+			}),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const result = await startBackgroundCommandCore(pi, ctx.cwd, params.command);
+			if (!result.ok) {
+				return {
+					isError: true,
+					content: [{ type: "text" as const, text: `Failed to start background task: ${result.error}` }],
+					details: { command: params.command, error: result.error },
+				};
+			}
+			if (ctx.hasUI) {
+				await refreshRunning(pi, ctx).catch(() => undefined);
+			}
+			const { command: started } = result;
+			return {
+				content: [
+					{
+						type: "text" as const,
+						text: `Started background task.\nCommand: ${started.command}\nSession: ${started.session}\nLogs: ${started.logFile}\nStop with: stop_bg_task command=${JSON.stringify(started.command)}`,
+					},
+				],
+				details: {
+					command: started.command,
+					session: started.session,
+					logFile: started.logFile,
+					cwd: started.cwd,
+					startedAt: started.startedAt,
+				},
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "stop_bg_task",
+		label: "Stop Background Task",
+		description:
+			"Stop a background task previously started with start_bg_task. Pass the exact same command string used to start it. Matches running tasks in the current working directory and kills them. If nothing matches, the response lists what is currently running so you can retry with the right string.",
+		promptSnippet: "Stop a background task by passing the exact command string used to start it.",
+		parameters: Type.Object({
+			command: Type.String({
+				description: "The exact command string used with start_bg_task to launch the task you want to kill.",
+			}),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const { killed, running: allRunning } = await stopBackgroundCommandsByName(pi, ctx.cwd, params.command);
+			if (ctx.hasUI) {
+				await refreshRunning(pi, ctx).catch(() => undefined);
+			}
+			if (killed.length === 0) {
+				const hereRunning = allRunning.filter((c) => {
+					try {
+						return path.resolve(c.cwd) === path.resolve(ctx.cwd);
+					} catch {
+						return c.cwd === ctx.cwd;
+					}
+				});
+				const listing = hereRunning.length
+					? `Currently running in this cwd:\n${hereRunning.map((c) => `- ${c.command} (session ${c.session})`).join("\n")}`
+					: "No background tasks are currently running in this cwd.";
+				return {
+					isError: true,
+					content: [
+						{
+							type: "text" as const,
+							text: `No running background task matched command ${JSON.stringify(params.command)} in ${ctx.cwd}.\n${listing}`,
+						},
+					],
+					details: {
+						command: params.command,
+						killed: 0,
+						candidates: hereRunning.map((c) => ({ command: c.command, session: c.session, cwd: c.cwd })),
+					},
+				};
+			}
+			return {
+				content: [
+					{
+						type: "text" as const,
+						text: `Killed ${killed.length} background task${killed.length === 1 ? "" : "s"}:\n${killed.map((c) => `- ${c.command} (session ${c.session})`).join("\n")}`,
+					},
+				],
+				details: {
+					command: params.command,
+					killed: killed.length,
+					sessions: killed.map((c) => c.session),
+				},
+			};
+		},
+	});
+
+	pi.events.on("bg:editorUpEmpty", (data: unknown) => {
+		const out = data as { handled: boolean };
 		const ctx = latestCtx;
 		if (!ctx?.hasUI || logViewerOpen) return;
 		const here = runningForCwd(ctx.cwd);
