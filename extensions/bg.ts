@@ -616,6 +616,139 @@ export default function bgExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
+		name: "bg_task_status",
+		label: "Background Task Status",
+		description:
+			"Check whether a background task started via start_bg_task is still actively running, and optionally peek at the tail of its log output. Pass a `command` string to check a specific task, or omit it to list every background task running in the current working directory. Useful for confirming a dev server has booted, polling whether a long build finished, or fetching recent log lines to diagnose a failure without leaving the agent loop.",
+		promptSnippet:
+			"Check if a background task is still running and optionally read recent log lines.",
+		parameters: Type.Object({
+			command: Type.Optional(
+				Type.String({
+					description:
+						"Optional exact command string used with start_bg_task. If omitted, returns the status of every background task in the current working directory.",
+				}),
+			),
+			logLines: Type.Optional(
+				Type.Number({
+					description:
+						"How many trailing log lines to include per running task (default 40, max 500). Set to 0 to skip log output.",
+					minimum: 0,
+					maximum: 500,
+				}),
+			),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			if (!tmuxAvailable()) {
+				return {
+					isError: true,
+					content: [{ type: "text" as const, text: "tmux is not installed; no background tasks can be running." }],
+					details: { tmux: false },
+				};
+			}
+
+			const all = await listRunningCommands(pi);
+			const hereRunning = all.filter((c) => {
+				if (!c.cwd) return false;
+				try {
+					return path.resolve(c.cwd) === path.resolve(ctx.cwd);
+				} catch {
+					return c.cwd === ctx.cwd;
+				}
+			});
+			const lineCount = params.logLines ?? 40;
+			const now = Date.now();
+
+			const summarize = async (cmd: RunningCommand) => {
+				const uptimeMs = cmd.startedAt ? now - cmd.startedAt : 0;
+				const logs = lineCount > 0 ? await readLogs(pi, cmd, lineCount) : "";
+				return {
+					command: cmd.command,
+					session: cmd.session,
+					cwd: cmd.cwd,
+					logFile: cmd.logFile,
+					startedAt: cmd.startedAt,
+					uptimeMs,
+					logs,
+				};
+			};
+
+			const formatUptime = (ms: number): string => {
+				if (!ms || ms < 0) return "unknown";
+				const sec = Math.floor(ms / 1000);
+				if (sec < 60) return `${sec}s`;
+				const min = Math.floor(sec / 60);
+				if (min < 60) return `${min}m ${sec % 60}s`;
+				const hr = Math.floor(min / 60);
+				return `${hr}h ${min % 60}m`;
+			};
+
+			if (params.command !== undefined) {
+				const trimmed = params.command.trim();
+				const match = hereRunning.find((c) => c.command.trim() === trimmed);
+				if (!match) {
+					const listing = hereRunning.length
+						? `Currently running in this cwd:\n${hereRunning.map((c) => `- ${c.command} (session ${c.session})`).join("\n")}`
+						: "No background tasks are currently running in this cwd.";
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: `Background task ${JSON.stringify(trimmed)} is NOT running in ${ctx.cwd}.\n${listing}`,
+							},
+						],
+						details: {
+							command: trimmed,
+							running: false,
+							candidates: hereRunning.map((c) => ({ command: c.command, session: c.session })),
+						},
+					};
+				}
+				const info = await summarize(match);
+				const logSection = info.logs ? `\nLast ${lineCount} log line${lineCount === 1 ? "" : "s"}:\n${info.logs}` : "";
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: `Background task is RUNNING.\nCommand: ${info.command}\nSession: ${info.session}\nUptime: ${formatUptime(info.uptimeMs)}\nLogs: ${info.logFile}${logSection}`,
+						},
+					],
+					details: { running: true, ...info },
+				};
+			}
+
+			if (hereRunning.length === 0) {
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: `No background tasks are currently running in ${ctx.cwd}.`,
+						},
+					],
+					details: { running: false, tasks: [] },
+				};
+			}
+
+			const summaries = await Promise.all(hereRunning.map(summarize));
+			const text = summaries
+				.map((info) => {
+					const logSection = info.logs ? `\n  logs:\n${info.logs.split("\n").map((l) => `    ${l}`).join("\n")}` : "";
+					return `- ${info.command}\n  session: ${info.session}\n  uptime: ${formatUptime(info.uptimeMs)}\n  logFile: ${info.logFile}${logSection}`;
+				})
+				.join("\n");
+			return {
+				content: [
+					{
+						type: "text" as const,
+						text: `${hereRunning.length} background task${hereRunning.length === 1 ? "" : "s"} running in ${ctx.cwd}:\n${text}`,
+					},
+				],
+				details: { running: true, tasks: summaries },
+			};
+		},
+	});
+
+	pi.registerTool({
 		name: "stop_bg_task",
 		label: "Stop Background Task",
 		description:

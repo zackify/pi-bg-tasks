@@ -8,7 +8,7 @@ Use it for dev servers, watchers, long-running scripts, or anything you want to 
 
 - `/bg <command>` starts a command in a detached `tmux` session from the current project directory
 - `/bg` opens an interactive menu for recent and running background commands
-- The LLM can launch and kill background tasks itself via the `start_bg_task` and `stop_bg_task` tools (e.g. "start `npm run dev` in the background")
+- The LLM can launch, inspect, and kill background tasks itself via the `start_bg_task`, `bg_task_status`, and `stop_bg_task` tools (e.g. "start `npm run dev` in the background, wait until it's ready, then run the e2e tests")
 - A small widget appears above the editor while commands are running in the current directory
 - Press `↑` from the main chat to peek at the latest logs for a running background command
 - Press `↑` again while viewing logs to close the log viewer and return to chat
@@ -86,17 +86,29 @@ When a background command is running in the current directory, pi shows a small 
 
 ### LLM tools
 
-The extension also exposes two tools the model can call directly, so you can just ask in natural language:
+The extension exposes three tools the model can call directly, so you can just ask in natural language and let the agent keep working while the task runs:
 
-- `start_bg_task` — takes a `command` string and launches it the same way `/bg <command>` does. Returns the tmux session id and log file path.
-- `stop_bg_task` — takes the same `command` string and kills the matching background task in the current working directory. If nothing matches it returns the list of currently running tasks so the model can retry.
+- `start_bg_task` — takes a `command` string and launches it the same way `/bg <command>` does. Returns the tmux session id and log file path so the model can find it later.
+- `bg_task_status` — checks whether a background task is still actively running, how long it has been up, and the tail of its log output. Pass a `command` to check a specific task, or omit it to list every background task in the current working directory. Optional `logLines` (default 40, max 500, set to 0 to skip logs).
+- `stop_bg_task` — takes the same `command` string and kills the matching background task in the current working directory. If nothing matches it returns the list of currently running tasks so the model can retry with the right name.
+
+Matching is scoped to the current working directory, so the model cannot accidentally touch a task running in another project.
+
+#### Why this matters for the agent
+
+Without background tasks, an AI agent that needs a dev server, watcher, or long build has two bad options: block the entire turn on a process that never exits, or fire-and-forget and lose all visibility. These tools fix both problems:
+
+- **Non-blocking startup.** `start_bg_task` returns immediately with a session id and log file. The agent can move on to running tests, editing code, or hitting an endpoint instead of hanging on `npm run dev`.
+- **Active polling.** `bg_task_status` lets the agent loop "start → poll logs → continue when ready" without a human in the middle. It can confirm a server printed `Listening on :3000`, detect a compile error in a watcher, or notice that a long migration finally finished, all by re-reading the log tail.
+- **Self-healing cleanup.** `stop_bg_task` makes the agent responsible for tearing down what it started. Combined with the cwd-scoped matching, the model can safely manage multiple tasks across a session without leaking processes.
+- **Stable references.** Tasks are addressed by the exact command string the agent used to start them, so the model does not have to track opaque session ids across tool calls — it just remembers what it asked for.
 
 Example prompts:
 
-- "Start `npm run dev` as a background task and then run the e2e tests."
+- "Start `npm run dev` as a background task, wait until it's listening, then run the e2e tests and stop it when you're done."
+- "Is the `pnpm build --watch` task still running? Show me the last 100 lines of its logs."
+- "List every background task running in this project."
 - "Kill the `npm run dev` background task."
-
-Matching is scoped to the current working directory, so the model cannot accidentally kill a task running in another project.
 
 ## History and logs
 
