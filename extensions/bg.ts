@@ -8,22 +8,22 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const CACHE_PATH = path.join(os.homedir(), ".pi", "agent", "bg-cache.json");
-const META_DIR = path.join(os.homedir(), ".pi", "agent", "bg-meta");
-const LOG_DIR = path.join(os.homedir(), ".pi", "agent", "bg-logs");
-const WIDGET_ID = "pi-bg-running";
-const POLL_MS = 5000;
-const RECENT_LIMIT = 10;
+export const CACHE_PATH = path.join(os.homedir(), ".pi", "agent", "bg-cache.json");
+export const META_DIR = path.join(os.homedir(), ".pi", "agent", "bg-meta");
+export const LOG_DIR = path.join(os.homedir(), ".pi", "agent", "bg-logs");
+export const WIDGET_ID = "pi-bg-running";
+export const POLL_MS = 5000;
+export const RECENT_LIMIT = 10;
 
-type Cache = {
+export type Cache = {
 	cwds?: Record<string, CwdCache>;
 };
 
-type CwdCache = {
+export type CwdCache = {
 	recentBackgroundCommands?: string[];
 };
 
-type RunningCommand = {
+export type RunningCommand = {
 	session: string;
 	command: string;
 	cwd: string;
@@ -31,22 +31,22 @@ type RunningCommand = {
 	startedAt: number;
 };
 
-type MenuItem =
+export type MenuItem =
 	| { type: "new"; label: string }
 	| { type: "recent"; command: string }
 	| { type: "running"; running: RunningCommand }
 	| { type: "separator"; label: string };
 
-let latestCtx: ExtensionContext | undefined;
-let latestPi: ExtensionAPI | undefined;
-let running: RunningCommand[] = [];
-let pollTimer: NodeJS.Timeout | undefined;
-let refreshInFlight = false;
-let processHooksInstalled = false;
-let widgetInstalled = false;
-let logViewerOpen = false;
+export let latestCtx: ExtensionContext | undefined;
+export let latestPi: ExtensionAPI | undefined;
+export let running: RunningCommand[] = [];
+export let pollTimer: NodeJS.Timeout | undefined;
+export let refreshInFlight = false;
+export let processHooksInstalled = false;
+export let widgetInstalled = false;
+export let logViewerOpen = false;
 
-function runningForCwd(cwd: string): RunningCommand[] {
+export function runningForCwd(cwd: string): RunningCommand[] {
 	const normalized = path.resolve(cwd);
 	return running.filter((cmd) => {
 		if (!cmd.cwd) return false;
@@ -58,17 +58,17 @@ function runningForCwd(cwd: string): RunningCommand[] {
 	});
 }
 
-function shellQuote(value: string): string {
+export function shellQuote(value: string): string {
 	return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
-function truncateMiddle(value: string, max = 80): string {
+export function truncateMiddle(value: string, max = 80): string {
 	if (value.length <= max) return value;
 	const half = Math.floor((max - 1) / 2);
 	return `${value.slice(0, half)}…${value.slice(value.length - half)}`;
 }
 
-function loadCache(): Cache {
+export function loadCache(): Cache {
 	try {
 		return JSON.parse(fs.readFileSync(CACHE_PATH, "utf8")) as Cache;
 	} catch {
@@ -76,12 +76,12 @@ function loadCache(): Cache {
 	}
 }
 
-function saveCache(cache: Cache): void {
+export function saveCache(cache: Cache): void {
 	fs.mkdirSync(path.dirname(CACHE_PATH), { recursive: true });
 	fs.writeFileSync(CACHE_PATH, `${JSON.stringify(cache, null, "\t")}\n`, "utf8");
 }
 
-function cwdKey(cwd: string): string {
+export function cwdKey(cwd: string): string {
 	try {
 		return path.resolve(cwd);
 	} catch {
@@ -89,7 +89,7 @@ function cwdKey(cwd: string): string {
 	}
 }
 
-function getRecentCommands(cwd: string): string[] {
+export function getRecentCommands(cwd: string): string[] {
 	const cache = loadCache();
 	const key = cwdKey(cwd);
 	const recents = cache.cwds?.[key]?.recentBackgroundCommands ?? [];
@@ -106,7 +106,7 @@ function getRecentCommands(cwd: string): string[] {
 	return filtered;
 }
 
-function rememberCommand(cwd: string, command: string): void {
+export function rememberCommand(cwd: string, command: string): void {
 	const trimmed = command.trim();
 	if (!trimmed) return;
 	const cache = loadCache();
@@ -119,16 +119,16 @@ function rememberCommand(cwd: string, command: string): void {
 	saveCache(cache);
 }
 
-function tmuxAvailable(): boolean {
+export function tmuxAvailable(): boolean {
 	const result = spawnSync("tmux", ["-V"], { stdio: "ignore" });
 	return result.status === 0;
 }
 
-async function exec(pi: ExtensionAPI, command: string, args: string[], timeout = 8000) {
+export async function exec(pi: ExtensionAPI, command: string, args: string[], timeout = 8000) {
 	return pi.exec(command, args, { timeout });
 }
 
-async function listRunningCommands(pi: ExtensionAPI): Promise<RunningCommand[]> {
+export async function listRunningCommands(pi: ExtensionAPI): Promise<RunningCommand[]> {
 	if (!tmuxAvailable()) return [];
 	const result = await exec(pi, "tmux", ["list-sessions", "-F", "#S"], 5000);
 	if (result.code !== 0) return [];
@@ -162,7 +162,7 @@ async function listRunningCommands(pi: ExtensionAPI): Promise<RunningCommand[]> 
 	return commands.sort((a, b) => b.startedAt - a.startedAt);
 }
 
-async function refreshRunning(pi: ExtensionAPI, ctx = latestCtx): Promise<void> {
+export async function refreshRunning(pi: ExtensionAPI, ctx = latestCtx): Promise<void> {
 	if (!ctx || refreshInFlight) return;
 	refreshInFlight = true;
 	try {
@@ -173,7 +173,7 @@ async function refreshRunning(pi: ExtensionAPI, ctx = latestCtx): Promise<void> 
 	}
 }
 
-function updateWidget(ctx: ExtensionContext | undefined): void {
+export function updateWidget(ctx: ExtensionContext | undefined): void {
 	if (!ctx?.hasUI) return;
 	latestCtx = ctx;
 	const here = runningForCwd(ctx.cwd);
@@ -208,22 +208,22 @@ function updateWidget(ctx: ExtensionContext | undefined): void {
 	(ctx.ui as { requestRender?: () => void }).requestRender?.();
 }
 
-function startPoller(pi: ExtensionAPI): void {
+export function startPoller(pi: ExtensionAPI): void {
 	if (pollTimer) return;
 	pollTimer = setInterval(() => void refreshRunning(pi), POLL_MS);
 	pollTimer.unref?.();
 }
 
-function stopPoller(): void {
+export function stopPoller(): void {
 	if (pollTimer) clearInterval(pollTimer);
 	pollTimer = undefined;
 }
 
-function killSessionSync(session: string): void {
+export function killSessionSync(session: string): void {
 	spawnSync("tmux", ["kill-session", "-t", session], { stdio: "ignore", timeout: 3000 });
 }
 
-function killAllRunningCommandsSync(): void {
+export function killAllRunningCommandsSync(): void {
 	if (!tmuxAvailable()) return;
 	const result = spawnSync("tmux", ["list-sessions", "-F", "#S"], { encoding: "utf8", timeout: 3000 });
 	if (result.status !== 0 || !result.stdout) return;
@@ -233,7 +233,7 @@ function killAllRunningCommandsSync(): void {
 	}
 }
 
-async function killAllRunningCommands(pi: ExtensionAPI, ctx?: ExtensionContext): Promise<void> {
+export async function killAllRunningCommands(pi: ExtensionAPI, ctx?: ExtensionContext): Promise<void> {
 	const commands = await listRunningCommands(pi);
 	for (const command of commands) {
 		await exec(pi, "tmux", ["kill-session", "-t", command.session], 5000).catch(() => undefined);
@@ -242,7 +242,7 @@ async function killAllRunningCommands(pi: ExtensionAPI, ctx?: ExtensionContext):
 	if (ctx?.hasUI) updateWidget(ctx);
 }
 
-function installProcessHooks(): void {
+export function installProcessHooks(): void {
 	if (processHooksInstalled) return;
 	processHooksInstalled = true;
 	process.on("exit", killAllRunningCommandsSync);
@@ -251,7 +251,7 @@ function installProcessHooks(): void {
 	process.on("SIGHUP", killAllRunningCommandsSync);
 }
 
-function uninstallProcessHooks(): void {
+export function uninstallProcessHooks(): void {
 	if (!processHooksInstalled) return;
 	processHooksInstalled = false;
 	process.off("exit", killAllRunningCommandsSync);
@@ -260,7 +260,7 @@ function uninstallProcessHooks(): void {
 	process.off("SIGHUP", killAllRunningCommandsSync);
 }
 
-function makeSessionId(cwd: string, command: string): string {
+export function makeSessionId(cwd: string, command: string): string {
 	const hash = crypto
 		.createHash("sha1")
 		.update(`${cwd}|${command}|${Date.now()}|${Math.random()}`)
@@ -269,9 +269,9 @@ function makeSessionId(cwd: string, command: string): string {
 	return `pi-bg-${hash}`;
 }
 
-type StartResult = { ok: true; command: RunningCommand } | { ok: false; error: string };
+export type StartResult = { ok: true; command: RunningCommand } | { ok: false; error: string };
 
-async function startBackgroundCommandCore(
+export async function startBackgroundCommandCore(
 	pi: ExtensionAPI,
 	cwd: string,
 	command: string,
@@ -307,7 +307,7 @@ async function startBackgroundCommandCore(
 	return { ok: true, command: metadata };
 }
 
-async function startBackgroundCommand(
+export async function startBackgroundCommand(
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
 	command: string,
@@ -327,7 +327,7 @@ async function startBackgroundCommand(
 	return result.command;
 }
 
-async function stopBackgroundCommandsByName(
+export async function stopBackgroundCommandsByName(
 	pi: ExtensionAPI,
 	cwd: string,
 	command: string,
@@ -363,13 +363,13 @@ async function stopBackgroundCommandsByName(
 	return { killed, running: all };
 }
 
-async function readLogs(pi: ExtensionAPI, command: RunningCommand, lines = 80): Promise<string> {
+export async function readLogs(pi: ExtensionAPI, command: RunningCommand, lines = 80): Promise<string> {
 	const result = await exec(pi, "tail", [`-n`, String(Math.max(1, Math.min(lines, 500))), command.logFile], 5000);
 	if (result.code !== 0) return result.stderr.trim() || "No log output yet.";
 	return result.stdout.trimEnd() || "No log output yet.";
 }
 
-async function killRunningCommand(
+export async function killRunningCommand(
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
 	command: RunningCommand,
@@ -387,7 +387,7 @@ async function killRunningCommand(
 	return true;
 }
 
-async function attachToCommand(ctx: ExtensionContext, command: RunningCommand): Promise<void> {
+export async function attachToCommand(ctx: ExtensionContext, command: RunningCommand): Promise<void> {
 	if (!ctx.hasUI) return;
 	await ctx.ui.custom<void>((tui, _theme, _kb, done) => {
 		tui.stop();
@@ -400,11 +400,11 @@ async function attachToCommand(ctx: ExtensionContext, command: RunningCommand): 
 	});
 }
 
-function selectableItems(items: MenuItem[]): number[] {
+export function selectableItems(items: MenuItem[]): number[] {
 	return items.flatMap((item, index) => (item.type === "separator" ? [] : [index]));
 }
 
-function moveSelection(items: MenuItem[], selected: number, delta: number): number {
+export function moveSelection(items: MenuItem[], selected: number, delta: number): number {
 	const selectable = selectableItems(items);
 	if (selectable.length === 0) return 0;
 	const current = Math.max(0, selectable.indexOf(selected));
@@ -412,7 +412,7 @@ function moveSelection(items: MenuItem[], selected: number, delta: number): numb
 	return selectable[next]!;
 }
 
-function buildMenuItems(recents: string[], runningCommands: RunningCommand[]): MenuItem[] {
+export function buildMenuItems(recents: string[], runningCommands: RunningCommand[]): MenuItem[] {
 	const items: MenuItem[] = [];
 	if (runningCommands.length > 0) {
 		items.push({ type: "separator", label: "running" });
@@ -424,7 +424,7 @@ function buildMenuItems(recents: string[], runningCommands: RunningCommand[]): M
 	return items;
 }
 
-async function showBgMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<MenuItem | null> {
+export async function showBgMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<MenuItem | null> {
 	let recents = getRecentCommands(ctx.cwd);
 	running = await listRunningCommands(pi);
 	updateWidget(ctx);
@@ -500,7 +500,7 @@ async function showBgMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promi
 	}));
 }
 
-async function showLogs(pi: ExtensionAPI, ctx: ExtensionContext, command: RunningCommand): Promise<void> {
+export async function showLogs(pi: ExtensionAPI, ctx: ExtensionContext, command: RunningCommand): Promise<void> {
 	let output = await readLogs(pi, command);
 	let busy = false;
 	let pollTimer: NodeJS.Timeout | undefined;
